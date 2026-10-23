@@ -243,11 +243,11 @@ jobs:
       # ============================================================
       # 5 编译（不签名）
       # ============================================================
-      - name: 5 编译
+      - name: 5 编译（失败也把 error 摘出来）
         run: |
-          set -euo pipefail
+          set +e
           SRC="${{ steps.locate.outputs.SRC }}"
-          cd "$SRC"
+          cd "$SRC" || { echo "::error title=出错::进不去源码目录"; exit 1; }
           echo "==== 开始编译 v26.0 ===="
           xcodebuild \
             -project ThreeOneOSFive.xcodeproj \
@@ -259,8 +259,45 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             EXPANDED_CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee /tmp/build.log
-          echo "==== 编译成功 ===="
+            build > /tmp/build.log 2>&1
+          RC=$?
+          echo "xcodebuild 退出码：$RC"
+
+          if [ "$RC" -eq 0 ]; then
+            echo "==== 编译成功 ===="
+            exit 0
+          fi
+
+          grep -E "error: " /tmp/build.log | sort -u | head -20 > /tmp/errs.txt
+          N=$(wc -l < /tmp/errs.txt | tr -d ' ')
+          echo "==== 抓到 $N 条 error 行 ===="
+
+          if [ "$N" -gt 0 ]; then
+            while IFS= read -r line; do
+              short=$(printf '%s' "$line" | sed -E 's#^.*/(ThreeOneOSFive|LSPakManager[^/]*)/##' | cut -c1-350)
+              echo "::error title=编译错误::$short"
+              echo "  🔴 $short"
+            done < /tmp/errs.txt
+          else
+            echo "::error title=编译失败::没抓到 error 行，看日志结尾 60 行"
+          fi
+
+          {
+            echo "## 🔴 v26.0 编译错误"
+            echo ""
+            echo '```'
+            cat /tmp/errs.txt
+            echo '```'
+            echo ""
+            echo "## 日志结尾 60 行"
+            echo '```'
+            tail -60 /tmp/build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          { echo "==== error 行 ===="; cat /tmp/errs.txt; echo; echo "==== 结尾 80 行 ===="; tail -80 /tmp/build.log; } > "$GITHUB_WORKSPACE/v26-编译错误.txt"
+
+          exit "$RC"
 
       - name: 6 打未签名 ipa + 302 自查
         run: |
@@ -307,10 +344,18 @@ jobs:
           path: langshen-v26.0-unsigned.ipa
           if-no-files-found: error
 
-      - name: 8 出错时把 error 摘出来
+      - name: 8 出错时补打一遍日志结尾
         if: failure()
         run: |
-          echo "==== error: 行 ===="
-          grep -E "error:" /tmp/build.log | head -50 || echo "（没有 error 行）"
-          echo "==== 结尾 40 行 ===="
-          tail -40 /tmp/build.log || true
+          echo "==== error 行 ===="
+          grep -E "error: " /tmp/build.log | sort -u | head -30 || echo "（没有 error 行）"
+          echo "==== 结尾 60 行 ===="
+          tail -60 /tmp/build.log || true
+
+      - name: 9 出错时把错误清单传上来
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v26-编译错误
+          path: v26-编译错误.txt
+          if-no-files-found: ignore
